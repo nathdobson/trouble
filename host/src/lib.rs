@@ -36,7 +36,7 @@ pub mod att;
 #[cfg(feature = "central")]
 pub mod central;
 mod channel_manager;
-mod codec;
+pub mod codec;
 mod command;
 pub mod config;
 mod connection_manager;
