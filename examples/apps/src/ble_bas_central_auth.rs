@@ -23,17 +23,15 @@ where
     let address: Address = Address::random([0xff, 0x8f, 0x1b, 0x05, 0xe4, 0xff]);
     info!("Our address = {:?}", address);
 
-    let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> = HostResources::new();
+    let mut resources: HostResources<_, DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> = HostResources::new();
     let stack = trouble_host::new(controller, &mut resources)
         .set_random_address(address)
         .set_random_generator_seed(random_generator)
-        .set_io_capabilities(IoCapabilities::DisplayYesNo);
+        .set_io_capabilities(IoCapabilities::DisplayYesNo)
+        .build();
 
-    let Host {
-        mut central,
-        mut runner,
-        ..
-    } = stack.build();
+    let mut runner = stack.runner();
+    let mut central = stack.central();
 
     // NOTE: Modify this to match the address of the peripheral you want to connect to.
     // Currently it matches the address used by the peripheral examples
@@ -59,32 +57,33 @@ where
                     match conn.next().await {
                         ConnectionEvent::PassKeyDisplay(passkey) => {
                             info!("Pairing with pass key {}", passkey);
-                        },
+                        }
                         ConnectionEvent::PassKeyConfirm(passkey) => {
                             info!("Press the yes or no button to confirm pairing with key = {}", passkey);
                             match select(yes.wait_for_low(), no.wait_for_low()).await {
                                 Either::First(_) => {
                                     info!("[gatt] confirming pairing");
                                     conn.pass_key_confirm().unwrap();
-                                },
+                                }
                                 Either::Second(_) => {
                                     info!("[gatt] denying pairing");
                                     conn.pass_key_cancel().unwrap();
-                                },
+                                }
                             }
                         }
                         ConnectionEvent::PairingComplete { security_level, .. } => {
                             info!("Pairing complete: {:?}", security_level);
                             break;
-                        },
+                        }
                         ConnectionEvent::PairingFailed(err) => {
                             error!("Pairing failed: {:?}", err);
                             break;
-                        },
+                        }
                         ConnectionEvent::Disconnected { reason } => {
                             error!("Disconnected: {:?}", reason);
                             continue 'connect;
                         }
+                        ConnectionEvent::RequestConnectionParams(req) => req.accept(None, &stack).await.unwrap(),
                         x => {
                             warn!("Unhandled event: {:?}", x);
                         }
@@ -127,10 +126,10 @@ where
                         }
                     },
                 )
-                    .await;
-            })
                 .await;
+            })
+            .await;
         }
     })
-        .await;
+    .await;
 }

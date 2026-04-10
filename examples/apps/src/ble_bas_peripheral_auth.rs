@@ -22,7 +22,7 @@ struct Server {
 struct BatteryService {
     /// Battery Level
     #[descriptor(uuid = descriptors::VALID_RANGE, read, value = [0, 100])]
-    #[descriptor(uuid = descriptors::MEASUREMENT_DESCRIPTION, name = "hello", read, value = "Battery Level")]
+    #[descriptor(uuid = descriptors::MEASUREMENT_DESCRIPTION, name = "hello", read, value = "Battery Level", type = &'static str)]
     #[characteristic(uuid = characteristic::BATTERY_LEVEL, read, notify, value = 10)]
     level: u8,
     #[characteristic(uuid = "408813df-5dd4-1f87-ec11-cdb001100000", write, read, notify)]
@@ -35,28 +35,29 @@ where
     C: Controller,
     RNG: RngCore + CryptoRng,
     YES: embedded_hal_async::digital::Wait,
-    NO: embedded_hal_async::digital::Wait
+    NO: embedded_hal_async::digital::Wait,
 {
     // Using a fixed "random" address can be useful for testing. In real scenarios, one would
     // use e.g. the MAC 6 byte array as the address (how to get that varies by the platform).
     let address: Address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
     info!("Our address = {}", address);
 
-    let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> = HostResources::new();
+    let mut resources: HostResources<_, DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> = HostResources::new();
     let stack = trouble_host::new(controller, &mut resources)
         .set_random_address(address)
         .set_random_generator_seed(random_generator)
-        .set_io_capabilities(IoCapabilities::DisplayYesNo);
-    let Host {
-        mut peripheral, runner, ..
-    } = stack.build();
+        .set_io_capabilities(IoCapabilities::DisplayYesNo)
+        .build();
+
+    let runner = stack.runner();
+    let mut peripheral = stack.peripheral();
 
     info!("Starting advertising and GATT service");
     let server = Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
         name: "TrouBLE",
         appearance: &appearance::power_device::GENERIC_POWER_DEVICE,
     }))
-        .unwrap();
+    .unwrap();
 
     let _ = join(ble_task(runner), async {
         loop {
@@ -75,7 +76,7 @@ where
             }
         }
     })
-        .await;
+    .await;
 }
 
 /// This is a background task that is required to run forever alongside any other BLE tasks.
@@ -107,10 +108,15 @@ async fn ble_task<C: Controller, P: PacketPool>(mut runner: Runner<'_, C, P>) {
 ///
 /// This function will handle the GATT events and process them.
 /// This is how we interact with read and write requests.
-async fn gatt_events_task<YES, NO>(server: &Server<'_>, conn: &GattConnection<'_, '_, DefaultPacketPool>, yes: &mut YES, no: &mut NO) -> Result<(), Error>
+async fn gatt_events_task<YES, NO>(
+    server: &Server<'_>,
+    conn: &GattConnection<'_, '_, DefaultPacketPool>,
+    yes: &mut YES,
+    no: &mut NO,
+) -> Result<(), Error>
 where
     YES: Wait,
-    NO: Wait
+    NO: Wait,
 {
     let level = server.battery_service.level;
     let reason = loop {
@@ -118,20 +124,20 @@ where
             GattConnectionEvent::Disconnected { reason } => break reason,
             GattConnectionEvent::PassKeyDisplay(key) => {
                 info!("[gatt] passkey display: {}", key);
-            },
+            }
             GattConnectionEvent::PassKeyConfirm(key) => {
                 info!("Press the yes or no button to confirm pairing with key = {}", key);
                 match select(yes.wait_for_low(), no.wait_for_low()).await {
                     Either::First(_) => {
                         info!("[gatt] confirming pairing");
                         conn.pass_key_confirm()?
-                    },
+                    }
                     Either::Second(_) => {
                         info!("[gatt] denying pairing");
                         conn.pass_key_cancel()?
-                    },
+                    }
                 }
-            },
+            }
             GattConnectionEvent::PairingComplete { security_level, .. } => {
                 info!("[gatt] pairing complete: {:?}", security_level);
             }
@@ -197,7 +203,7 @@ async fn advertise<'values, 'server, C: Controller>(
     let len = AdStructure::encode_slice(
         &[
             AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-            AdStructure::ServiceUuids16(&[[0x0f, 0x18]]),
+            AdStructure::IncompleteServiceUuids16(&[[0x0f, 0x18]]),
             AdStructure::CompleteLocalName(name.as_bytes()),
         ],
         &mut advertiser_data[..],
@@ -221,10 +227,7 @@ async fn advertise<'values, 'server, C: Controller>(
 /// This task will notify the connected central of a counter value every 2 seconds.
 /// It will also read the RSSI value every 2 seconds.
 /// and will stop when the connection is closed by the central or an error occurs.
-async fn custom_task<P: PacketPool>(
-    server: &Server<'_>,
-    conn: &GattConnection<'_, '_, P>,
-) {
+async fn custom_task<P: PacketPool>(server: &Server<'_>, conn: &GattConnection<'_, '_, P>) {
     let mut tick: u8 = 0;
     let level = server.battery_service.level;
     loop {

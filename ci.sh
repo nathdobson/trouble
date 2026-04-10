@@ -30,6 +30,7 @@ cargo batch \
     --- build --release --manifest-path host/Cargo.toml --no-default-features --features gatt,peripheral,central,scan,controller-host-flow-control,connection-metrics,channel-metrics,l2cap-sdu-reassembly-optimization \
     --- build --release --manifest-path host/Cargo.toml --no-default-features --features gatt,peripheral,central,scan,controller-host-flow-control,connection-metrics,channel-metrics,l2cap-sdu-reassembly-optimization,connection-params-update \
     --- build --release --manifest-path bt-hci-linux/Cargo.toml \
+    --- build --release --manifest-path bt-hci-usb/Cargo.toml \
     --- build --release --manifest-path examples/nrf52/Cargo.toml --target thumbv7em-none-eabihf --features nrf52840 \
     --- build --release --manifest-path examples/nrf52/Cargo.toml --target thumbv7em-none-eabihf --features nrf52840,security \
     --- build --release --manifest-path examples/nrf52/Cargo.toml --target thumbv7em-none-eabihf --features nrf52833 --artifact-dir tests/nrf52 \
@@ -39,14 +40,21 @@ cargo batch \
     --- build --release --manifest-path examples/serial-hci/Cargo.toml \
     --- build --release --manifest-path examples/linux/Cargo.toml \
     --- build --release --manifest-path examples/linux/Cargo.toml --features security \
+    --- build --release --manifest-path examples/usb-hci/Cargo.toml \
+    --- build --release --manifest-path examples/usb-hci/Cargo.toml --features security \
     --- build --release --manifest-path examples/tests/Cargo.toml \
     --- build --release --manifest-path benchmarks/nrf-sdc/Cargo.toml --target thumbv7em-none-eabihf --features nrf52840 \
     --- build --release --manifest-path examples/rp-pico-w/Cargo.toml --target thumbv6m-none-eabi --features skip-cyw43-firmware \
-    --- build --release --manifest-path examples/rp-pico-2-w/Cargo.toml --target thumbv8m.main-none-eabihf --features skip-cyw43-firmware
+    --- build --release --manifest-path examples/rp-pico-2-w/Cargo.toml --target thumbv8m.main-none-eabihf --features skip-cyw43-firmware \
+    --- build --release --manifest-path tester/nrf52/Cargo.toml --target thumbv7em-none-eabihf --features nrf52840
 #    --- build --release --manifest-path examples/apache-nimble/Cargo.toml --target thumbv7em-none-eabihf
 
 cargo fmt --check --manifest-path ./host/Cargo.toml
+cargo fmt --check --manifest-path ./tester/app/Cargo.toml
+cargo fmt --check --manifest-path ./tester/nrf52/Cargo.toml
 cargo clippy --manifest-path ./host/Cargo.toml --features gatt,peripheral,central
 cargo test --manifest-path ./host/Cargo.toml --lib -- --nocapture
+cargo test --manifest-path ./host/Cargo.toml --features central,gatt,peripheral,scan,security --lib -- --nocapture
 cargo test --manifest-path ./host/Cargo.toml --no-run -- --nocapture
 cargo test --manifest-path ./examples/tests/Cargo.toml --no-run -- --nocapture
+cargo test --manifest-path ./tester/app/Cargo.toml --lib -- --nocapture

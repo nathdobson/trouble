@@ -5,27 +5,30 @@
 #![doc = include_str!(concat!("../", env!("CARGO_PKG_README")))]
 #![warn(missing_docs)]
 
-use core::mem::MaybeUninit;
+use core::cell::{Cell, RefCell};
+use core::mem::{ManuallyDrop, MaybeUninit};
 
 use advertise::AdvertisementDataError;
+use bt_hci::cmd::le::LeReadMinimumSupportedConnectionInterval;
 use bt_hci::cmd::status::ReadRssi;
 use bt_hci::cmd::{AsyncCmd, SyncCmd};
-use bt_hci::param::{AddrKind, BdAddr};
+use bt_hci::param::{AddrKind, BdAddr, ConnHandle};
 use bt_hci::FromHciBytesError;
 use embassy_time::Duration;
 #[cfg(feature = "security")]
-use heapless::Vec;
+use heapless::{Vec, VecView};
+#[cfg(feature = "security")]
 use rand_core::{CryptoRng, RngCore};
 
 use crate::att::AttErrorCode;
 use crate::channel_manager::ChannelStorage;
+use crate::connection::Connection;
 use crate::connection_manager::ConnectionStorage;
 #[cfg(feature = "security")]
-pub use crate::security_manager::{BondInformation, IdentityResolvingKey, LongTermKey};
+pub use crate::security_manager::{
+    BondInformation, IdentityResolvingKey, LongTermKey, OobData, Reason as PairingFailedReason,
+};
 pub use crate::types::capabilities::IoCapabilities;
-
-/// Number of bonding information stored
-pub(crate) const BI_COUNT: usize = 10; // Should be configurable
 
 mod fmt;
 
@@ -81,7 +84,7 @@ pub mod prelude {
     pub use trouble_host_macros::*;
 
     pub use super::att::AttErrorCode;
-    pub use super::{BleHostError, Controller, Error, Host, HostResources, Packet, PacketPool, Stack};
+    pub use super::{BleHostError, Controller, Error, HostResources, Packet, PacketPool, Stack, StackBuilder};
     #[cfg(feature = "peripheral")]
     pub use crate::advertise::*;
     #[cfg(feature = "gatt")]
@@ -90,7 +93,7 @@ pub mod prelude {
     pub use crate::attribute_server::*;
     #[cfg(feature = "central")]
     pub use crate::central::*;
-    pub use crate::connection::*;
+    pub use crate::connection::{ConnectRateParams, *};
     #[cfg(feature = "gatt")]
     pub use crate::gap::*;
     #[cfg(feature = "gatt")]
@@ -105,7 +108,9 @@ pub mod prelude {
     #[cfg(feature = "scan")]
     pub use crate::scan::*;
     #[cfg(feature = "security")]
-    pub use crate::security_manager::{BondInformation, IdentityResolvingKey, LongTermKey};
+    pub use crate::security_manager::{
+        BondInformation, IdentityResolvingKey, LongTermKey, OobData, Reason as PairingFailedReason,
+    };
     pub use crate::types::capabilities::IoCapabilities;
     #[cfg(feature = "gatt")]
     pub use crate::types::gatt_traits::{AsGatt, FixedGattValue, FromGatt};
@@ -192,6 +197,7 @@ impl defmt::Format for Address {
 /// Because sometimes the peer uses the static or public address even though the IRK is sent.
 /// In this case, the IRK exists but the used address is not RPA.
 /// Should `Address` be used instead?
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Identity {
     /// Random static or public address
@@ -266,7 +272,7 @@ pub enum Error {
     Att(AttErrorCode),
     #[cfg(feature = "security")]
     /// Error from the security manager
-    Security(crate::security_manager::Reason),
+    Security(PairingFailedReason),
     /// Insufficient space in the buffer.
     InsufficientSpace,
     /// Invalid value.
@@ -323,6 +329,8 @@ pub enum Error {
 
     /// Error decoding advertisement data.
     Advertisement(AdvertisementDataError),
+    /// L2CAP credit-based connection refused by the peer.
+    L2capConnectError(crate::types::l2cap::LeCreditConnResultCode),
     /// Invalid l2cap channel id provided.
     InvalidChannelId,
     /// No l2cap channel available.
@@ -351,6 +359,8 @@ pub enum Error {
     ///
     /// The limit can be modified using the `gatt-client-notification-max-subscribers-N` features.
     GattSubscriberLimitReached,
+    /// Resource is already in use.
+    AlreadyInUse,
     /// Other error.
     Other,
 }
@@ -517,29 +527,54 @@ pub trait PacketPool: 'static {
 ///
 /// The l2cap packet pool is used by the host to handle inbound data, by allocating space for
 /// incoming packets and dispatching to the appropriate connection and channel.
-pub struct HostResources<P: PacketPool, const CONNS: usize, const CHANNELS: usize, const ADV_SETS: usize = 1> {
-    connections: MaybeUninit<[ConnectionStorage<P::Packet>; CONNS]>,
-    channels: MaybeUninit<[ChannelStorage<P::Packet>; CHANNELS]>,
-    advertise_handles: MaybeUninit<[AdvHandleState; ADV_SETS]>,
+pub struct HostResources<
+    C: Controller,
+    P: PacketPool,
+    const CONNS: usize,
+    const CHANNELS: usize,
+    const ADV_SETS: usize = 1,
+    const BONDS: usize = 10,
+> {
+    host: MaybeUninit<ManuallyDrop<BleHost<'static, C, P>>>,
+    connections: MaybeUninit<RefCell<[ConnectionStorage<P::Packet>; CONNS]>>,
+    channels: MaybeUninit<RefCell<[ChannelStorage<P::Packet>; CHANNELS]>>,
+    advertise_handles: MaybeUninit<RefCell<[AdvHandleState; ADV_SETS]>>,
+    #[cfg(feature = "security")]
+    bond_storage: MaybeUninit<RefCell<Vec<BondInformation, BONDS>>>,
 }
 
-impl<P: PacketPool, const CONNS: usize, const CHANNELS: usize, const ADV_SETS: usize> Default
-    for HostResources<P, CONNS, CHANNELS, ADV_SETS>
+impl<
+        C: Controller,
+        P: PacketPool,
+        const CONNS: usize,
+        const CHANNELS: usize,
+        const ADV_SETS: usize,
+        const BONDS: usize,
+    > Default for HostResources<C, P, CONNS, CHANNELS, ADV_SETS, BONDS>
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<P: PacketPool, const CONNS: usize, const CHANNELS: usize, const ADV_SETS: usize>
-    HostResources<P, CONNS, CHANNELS, ADV_SETS>
+impl<
+        C: Controller,
+        P: PacketPool,
+        const CONNS: usize,
+        const CHANNELS: usize,
+        const ADV_SETS: usize,
+        const BONDS: usize,
+    > HostResources<C, P, CONNS, CHANNELS, ADV_SETS, BONDS>
 {
     /// Create a new instance of host resources.
     pub const fn new() -> Self {
         Self {
+            host: MaybeUninit::uninit(),
             connections: MaybeUninit::uninit(),
             channels: MaybeUninit::uninit(),
             advertise_handles: MaybeUninit::uninit(),
+            #[cfg(feature = "security")]
+            bond_storage: MaybeUninit::uninit(),
         }
     }
 }
@@ -553,104 +588,211 @@ pub fn new<
     const CONNS: usize,
     const CHANNELS: usize,
     const ADV_SETS: usize,
+    const BONDS: usize,
 >(
     controller: C,
-    resources: &'resources mut HostResources<P, CONNS, CHANNELS, ADV_SETS>,
-) -> Stack<'resources, C, P> {
-    unsafe fn transmute_slice<T>(x: &mut [T]) -> &'static mut [T] {
-        unsafe { core::mem::transmute(x) }
-    }
+    resources: &'resources mut HostResources<C, P, CONNS, CHANNELS, ADV_SETS, BONDS>,
+) -> StackBuilder<'resources, C, P> {
+    let connections: &'resources RefCell<[ConnectionStorage<P::Packet>]> = resources
+        .connections
+        .write(RefCell::new([const { ConnectionStorage::new() }; CONNS]));
 
-    // Safety:
-    // - HostResources has the exceeding lifetime as the returned Stack.
-    // - Internal lifetimes are elided (made 'static) to simplify API usage
-    // - This _should_ be OK, because there are no references held to the resources
-    //   when the stack is shut down.
+    let channels: &'resources RefCell<[ChannelStorage<P::Packet>]> = resources
+        .channels
+        .write(RefCell::new([const { ChannelStorage::new() }; CHANNELS]));
 
-    let connections: &mut [ConnectionStorage<P::Packet>] =
-        &mut *resources.connections.write([const { ConnectionStorage::new() }; CONNS]);
-    let connections: &'resources mut [ConnectionStorage<P::Packet>] = unsafe { transmute_slice(connections) };
+    let advertise_handles: &'resources RefCell<[AdvHandleState]> = resources
+        .advertise_handles
+        .write(RefCell::new([AdvHandleState::None; ADV_SETS]));
 
-    let channels = &mut *resources.channels.write([const { ChannelStorage::new() }; CHANNELS]);
-    let channels: &'static mut [ChannelStorage<P::Packet>] = unsafe { transmute_slice(channels) };
+    #[cfg(feature = "security")]
+    let bond_storage: &'resources RefCell<VecView<BondInformation>> =
+        resources.bond_storage.write(RefCell::new(Vec::new()));
 
-    let advertise_handles = &mut *resources.advertise_handles.write([AdvHandleState::None; ADV_SETS]);
-    let advertise_handles: &'static mut [AdvHandleState] = unsafe { transmute_slice(advertise_handles) };
-    let host: BleHost<'_, C, P> = BleHost::new(controller, connections, channels, advertise_handles);
+    // SAFETY: Narrows the host field's lifetime from `'static` to `'resources`. Sound because:
+    // - BleHost is covariant in 'd so the types differ only in a lifetime (identical layout).
+    // - The returned StackBuilder/Stack exclusively borrows the HostResources for 'resources,
+    //   preventing re-entry into this function while the narrowed-lifetime data is live.
+    // - The host field is private, MaybeUninit (no auto-drop), and only ever accessed by this
+    //   function (which overwrites via write()), so the narrowed lifetime can never be observed
+    //   through the original `'static` type — even if the StackBuilder/Stack is mem::forget'd.
+    let host: &'resources mut MaybeUninit<ManuallyDrop<BleHost<'resources, C, P>>> =
+        unsafe { core::mem::transmute(&mut resources.host) };
 
-    Stack { host }
+    let host: &'resources mut ManuallyDrop<BleHost<'resources, C, P>> = host.write(ManuallyDrop::new(BleHost::new(
+        controller,
+        connections,
+        channels,
+        advertise_handles,
+        #[cfg(feature = "security")]
+        bond_storage,
+    )));
+
+    StackBuilder { host: Some(host) }
 }
 
 /// Contains the host stack
 pub struct Stack<'stack, C, P: PacketPool> {
-    host: BleHost<'stack, C, P>,
+    host: &'stack mut ManuallyDrop<BleHost<'stack, C, P>>,
+    runner_taken: Cell<bool>,
 }
 
-/// Host components.
-#[non_exhaustive]
-pub struct Host<'stack, C, P: PacketPool> {
-    /// Central role
-    #[cfg(feature = "central")]
-    pub central: Central<'stack, C, P>,
-    /// Peripheral role
-    #[cfg(feature = "peripheral")]
-    pub peripheral: Peripheral<'stack, C, P>,
-    /// Host runner
-    pub runner: Runner<'stack, C, P>,
+impl<'stack, C, P: PacketPool> Drop for Stack<'stack, C, P> {
+    fn drop(&mut self) {
+        // SAFETY: host was fully initialized in new() and has not been dropped.
+        // Stack is the sole owner responsible for dropping BleHost.
+        // All shared &BleHost references (in Runner, Central, etc.) have already
+        // been dropped (reverse drop order), so no aliasing conflict.
+        unsafe { ManuallyDrop::drop(self.host) }
+    }
 }
 
-impl<'stack, C: Controller, P: PacketPool> Stack<'stack, C, P> {
+/// Builder for configuring the BLE stack before use.
+///
+/// Call [`build()`](StackBuilder::build) to finalize configuration and obtain the [`Stack`].
+pub struct StackBuilder<'stack, C, P: PacketPool> {
+    host: Option<&'stack mut ManuallyDrop<BleHost<'stack, C, P>>>,
+}
+
+impl<'stack, C, P: PacketPool> Drop for StackBuilder<'stack, C, P> {
+    fn drop(&mut self) {
+        if let Some(host) = &mut self.host {
+            // SAFETY: host was fully initialized in new() and has not been dropped.
+            // `build()` was never called, leaving StackBuilder as the sole owner
+            // responsible for dropping BleHost.
+            unsafe { ManuallyDrop::drop(host) }
+        }
+    }
+}
+
+impl<'stack, C: Controller, P: PacketPool> StackBuilder<'stack, C, P> {
+    fn host(&mut self) -> &mut BleHost<'stack, C, P> {
+        self.host.as_mut().unwrap()
+    }
+
     /// Set the random address used by this host.
     pub fn set_random_address(mut self, address: Address) -> Self {
-        self.host.address.replace(address);
+        self.host().address.replace(address);
         #[cfg(feature = "security")]
-        self.host.connections.security_manager.set_local_address(address);
+        self.host().connections.security_manager.set_local_address(address);
         self
     }
-    /// Set the random generator seed for random generator used by security manager
-    pub fn set_random_generator_seed<RNG: RngCore + CryptoRng>(self, _random_generator: &mut RNG) -> Self {
-        #[cfg(feature = "security")]
+
+    /// Set the random generator seed for random generator used by security manager.
+    #[cfg(feature = "security")]
+    pub fn set_random_generator_seed<RNG: RngCore + CryptoRng>(mut self, _random_generator: &mut RNG) -> Self {
         {
             let mut random_seed = [0u8; 32];
             _random_generator.fill_bytes(&mut random_seed);
-            self.host
+            self.host()
                 .connections
                 .security_manager
                 .set_random_generator_seed(random_seed);
         }
         self
     }
+
     /// Set the IO capabilities used by the security manager.
     ///
     /// Only relevant if the feature `security` is enabled.
-    pub fn set_io_capabilities(self, io_capabilities: IoCapabilities) -> Self {
-        #[cfg(feature = "security")]
-        {
-            self.host
-                .connections
-                .security_manager
-                .set_io_capabilities(io_capabilities);
-        }
+    #[cfg(feature = "security")]
+    pub fn set_io_capabilities(mut self, io_capabilities: IoCapabilities) -> Self {
+        self.host()
+            .connections
+            .security_manager
+            .set_io_capabilities(io_capabilities);
         self
     }
 
-    /// Build the stack.
-    pub fn build(&'stack self) -> Host<'stack, C, P> {
+    /// Enable or disable secure connections only mode.
+    ///
+    /// When enabled, legacy pairing is rejected even if the `legacy-pairing` feature is compiled in.
+    /// This matches the BLE spec's "Secure Connections Only Mode" (Vol 3, Part C, Section 10.2.4).
+    ///
+    /// Only relevant if the feature `legacy-pairing` is enabled.
+    #[cfg(feature = "legacy-pairing")]
+    pub fn set_secure_connections_only(mut self, enabled: bool) -> Self {
+        self.host()
+            .connections
+            .security_manager
+            .set_secure_connections_only(enabled);
+        self
+    }
+
+    /// Finalize configuration and return the stack.
+    ///
+    /// Use the returned [`Stack`] for runtime operations: obtain a [`Runner`] via
+    /// [`Stack::runner()`], and [`Central`](central::Central) or
+    /// [`Peripheral`](peripheral::Peripheral) handles via [`Stack::central()`] and
+    /// [`Stack::peripheral()`].
+    pub fn build(mut self) -> Stack<'stack, C, P> {
         #[cfg(all(feature = "security", not(feature = "dev-disable-csprng-seed-requirement")))]
-        {
-            if !self.host.connections.security_manager.get_random_generator_seeded() {
-                panic!(
-                    "The security manager random number generator has not been seeded from a cryptographically secure random number generator"
-                )
-            }
+        if !self.host().connections.security_manager.get_random_generator_seeded() {
+            panic!(
+                "The security manager random number generator has not been seeded from a cryptographically secure random number generator"
+            )
         }
-        Host {
-            #[cfg(feature = "central")]
-            central: Central::new(self),
-            #[cfg(feature = "peripheral")]
-            peripheral: Peripheral::new(self),
-            runner: Runner::new(self),
+
+        Stack {
+            host: self.host.take().unwrap(),
+            runner_taken: Cell::new(false),
         }
+    }
+}
+
+impl<'stack, C: Controller, P: PacketPool> Stack<'stack, C, P> {
+    /// Obtain a [`Runner`] to drive the BLE host.
+    ///
+    /// The runner must be polled (e.g. via [`Runner::run()`]) to drive the BLE host.
+    pub fn runner(&self) -> Runner<'_, C, P> {
+        assert!(
+            !self.runner_taken.replace(true),
+            "runner() can only be called once per Stack"
+        );
+        Runner::new(self.host)
+    }
+
+    /// Obtain a [`Central`](central::Central) handle for the central BLE role.
+    ///
+    /// This is a lightweight handle that can be created multiple times.
+    /// Concurrent connect operations are serialized internally.
+    #[cfg(feature = "central")]
+    pub fn central(&self) -> Central<'_, C, P> {
+        Central::new(self.host)
+    }
+
+    /// Obtain a [`Peripheral`](peripheral::Peripheral) handle for the peripheral BLE role.
+    ///
+    /// This is a lightweight handle that can be created multiple times.
+    /// Concurrent advertise operations are serialized internally.
+    #[cfg(feature = "peripheral")]
+    pub fn peripheral(&self) -> Peripheral<'_, C, P> {
+        Peripheral::new(self.host)
+    }
+
+    /// Set the IO capabilities used by the security manager.
+    ///
+    /// Only relevant if the feature `security` is enabled.
+    #[cfg(feature = "security")]
+    pub fn set_io_capabilities(&self, io_capabilities: IoCapabilities) {
+        self.host
+            .connections
+            .security_manager
+            .set_io_capabilities(io_capabilities);
+    }
+
+    /// Enable or disable secure connections only mode.
+    ///
+    /// When enabled, legacy pairing is rejected even if the `legacy-pairing` feature is compiled in.
+    /// This matches the BLE spec's "Secure Connections Only Mode" (Vol 3, Part C, Section 10.2.4).
+    ///
+    /// Only relevant if the feature `legacy-pairing` is enabled.
+    #[cfg(feature = "legacy-pairing")]
+    pub fn set_secure_connections_only(&self, enabled: bool) {
+        self.host
+            .connections
+            .security_manager
+            .set_secure_connections_only(enabled);
     }
 
     /// Run a HCI command and return the response.
@@ -671,6 +813,16 @@ impl<'stack, C: Controller, P: PacketPool> Stack<'stack, C, P> {
         self.host.async_command(cmd).await
     }
 
+    /// Read the minimum supported connection interval from the controller.
+    pub async fn read_minimum_supported_connection_interval(
+        &self,
+    ) -> Result<<LeReadMinimumSupportedConnectionInterval as SyncCmd>::Return, BleHostError<C::Error>>
+    where
+        C: ControllerCmdSync<LeReadMinimumSupportedConnectionInterval>,
+    {
+        self.host.command(LeReadMinimumSupportedConnectionInterval::new()).await
+    }
+
     /// Read current host metrics
     pub fn metrics<F: FnOnce(&HostMetrics) -> R, R>(&self, f: F) -> R {
         self.host.metrics(f)
@@ -679,6 +831,21 @@ impl<'stack, C: Controller, P: PacketPool> Stack<'stack, C, P> {
     /// Log status information of the host
     pub fn log_status(&self, verbose: bool) {
         self.host.log_status(verbose);
+    }
+
+    #[cfg(feature = "security")]
+    /// Generate local OOB data for LESC pairing.
+    ///
+    /// The returned data should be transferred to the peer device via an out-of-band
+    /// channel (NFC, QR code, etc.) before pairing begins.
+    pub fn get_local_oob_data(&self) -> OobData {
+        self.host.connections.security_manager.get_local_oob_data()
+    }
+
+    #[cfg(feature = "security")]
+    /// Get the local address configured on the security manager.
+    pub fn get_local_address(&self) -> Option<Address> {
+        self.host.connections.security_manager.get_local_address()
     }
 
     #[cfg(feature = "security")]
@@ -697,9 +864,24 @@ impl<'stack, C: Controller, P: PacketPool> Stack<'stack, C, P> {
     }
 
     #[cfg(feature = "security")]
-    /// Get bonded devices
-    pub fn get_bond_information(&self) -> Vec<BondInformation, BI_COUNT> {
-        self.host.connections.security_manager.get_bond_information()
+    /// Access bonded devices
+    pub fn with_bond_information<R>(&self, f: impl FnOnce(&[BondInformation]) -> R) -> R {
+        f(&self.host.connections.security_manager.get_bond_information())
+    }
+
+    /// Get a connection by its peer address
+    pub fn get_connection_by_peer_address(&self, peer_address: Address) -> Option<Connection<'_, P>> {
+        self.host.connections.get_connection_by_peer_address(peer_address)
+    }
+
+    /// Get a connection by its handle
+    pub fn get_connected_handle(&self, handle: ConnHandle) -> Option<Connection<'_, P>> {
+        self.host.connections.get_connected_handle(handle)
+    }
+
+    /// Iterate over all currently connected connections.
+    pub fn connections(&self) -> connection_manager::ConnectedIter<'_, P> {
+        self.host.connections.connections()
     }
 }
 
@@ -709,4 +891,10 @@ pub(crate) fn bt_hci_duration<const US: u32>(d: Duration) -> bt_hci::param::Dura
 
 pub(crate) fn bt_hci_ext_duration<const US: u16>(d: Duration) -> bt_hci::param::ExtDuration<US> {
     bt_hci::param::ExtDuration::from_micros(d.as_micros())
+}
+
+// Re-export our version of embassy-sync for the macros
+#[doc(hidden)]
+pub mod __export {
+    pub use embassy_sync;
 }

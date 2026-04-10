@@ -4,8 +4,8 @@
 use defmt::{info, unwrap};
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_nrf::peripherals::RNG;
 use embassy_nrf::mode::Async;
+use embassy_nrf::peripherals::RNG;
 use embassy_nrf::{bind_interrupts, rng};
 use embassy_time::{Duration, Instant, Timer};
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
@@ -41,8 +41,8 @@ fn build_sdc<'d, const N: usize>(
     mem: &'d mut sdc::Mem<N>,
 ) -> Result<nrf_sdc::SoftdeviceController<'d>, nrf_sdc::Error> {
     sdc::Builder::new()?
-        .support_adv()?
-        .support_peripheral()?
+        .support_adv()
+        .support_peripheral()
         .peripheral_count(1)?
         .buffer_cfg(L2CAP_MTU as u16, L2CAP_MTU as u16, L2CAP_TXQ, L2CAP_RXQ)?
         .build(p, rng, mpsl, mem)
@@ -74,13 +74,12 @@ async fn main(spawner: Spawner) {
     let sdc = unwrap!(build_sdc(sdc_p, &mut rng, mpsl, &mut sdc_mem));
 
     let address: Address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
-    let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> = HostResources::new();
-    let stack = trouble_host::new(sdc, &mut resources).set_random_address(address);
-    let Host {
-        mut peripheral,
-        mut runner,
-        ..
-    } = stack.build();
+    let mut resources: HostResources<_, DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> = HostResources::new();
+    let stack = trouble_host::new(sdc, &mut resources)
+        .set_random_address(address)
+        .build();
+    let mut runner = stack.runner();
+    let mut peripheral = stack.peripheral();
 
     let mut adv_data = [0; 31];
     let adv_data_len = unwrap!(AdStructure::encode_slice(
@@ -116,7 +115,7 @@ async fn main(spawner: Spawner) {
                 mtu: Some(PAYLOAD_LEN as u16),
                 mps: Some(L2CAP_MTU as u16 - 4),
             };
-            let mut ch1 = unwrap!(L2capChannel::accept(&stack, &conn, &[0x2349], &config).await);
+            let mut ch1 = unwrap!(L2capChannel::accept(&stack, &conn, &[0xF2], &config).await);
 
             let mut rx = [0; PAYLOAD_LEN];
             for i in 0..500 {

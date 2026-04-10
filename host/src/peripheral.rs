@@ -12,16 +12,17 @@ use embassy_futures::select::{select, Either};
 
 use crate::advertise::{Advertisement, AdvertisementParameters, AdvertisementSet, RawAdvertisement};
 use crate::connection::Connection;
-use crate::{bt_hci_duration, bt_hci_ext_duration, Address, BleHostError, Error, PacketPool, Stack};
+use crate::host::BleHost;
+use crate::{bt_hci_duration, bt_hci_ext_duration, Address, BleHostError, Error, PacketPool};
 
 /// Type which implements the BLE peripheral role.
 pub struct Peripheral<'d, C, P: PacketPool> {
-    stack: &'d Stack<'d, C, P>,
+    host: &'d BleHost<'d, C, P>,
 }
 
 impl<'d, C: Controller, P: PacketPool> Peripheral<'d, C, P> {
-    pub(crate) fn new(stack: &'d Stack<'d, C, P>) -> Self {
-        Self { stack }
+    pub(crate) fn new(host: &'d BleHost<'d, C, P>) -> Self {
+        Self { host }
     }
 
     /// Start advertising with the provided parameters and return a handle to accept connections.
@@ -36,7 +37,11 @@ impl<'d, C: Controller, P: PacketPool> Peripheral<'d, C, P> {
             + for<'t> ControllerCmdSync<LeSetAdvEnable>
             + for<'t> ControllerCmdSync<LeSetScanResponseData>,
     {
-        let host = &self.stack.host;
+        let host = &self.host;
+
+        if !data.is_valid() {
+            return Err(BleHostError::BleHost(Error::InvalidValue));
+        }
 
         // Ensure no other advertise ongoing.
         let drop = crate::host::OnDrop::new(|| {
@@ -105,7 +110,7 @@ impl<'d, C: Controller, P: PacketPool> Peripheral<'d, C, P> {
         host.command(LeSetAdvEnable::new(true)).await?;
         drop.defuse();
         Ok(Advertiser {
-            stack: self.stack,
+            host: self.host,
             extended: false,
             done: false,
         })
@@ -120,7 +125,12 @@ impl<'d, C: Controller, P: PacketPool> Peripheral<'d, C, P> {
     where
         C: for<'t> ControllerCmdSync<LeSetAdvData> + for<'t> ControllerCmdSync<LeSetScanResponseData>,
     {
-        let host = &self.stack.host;
+        let host = &self.host;
+
+        if !data.is_valid() {
+            return Err(BleHostError::BleHost(Error::InvalidValue));
+        }
+
         let data: RawAdvertisement = data.into();
         if !data.props.legacy_adv() {
             return Err(Error::ExtendedAdvertisingNotSupported.into());
@@ -164,7 +174,15 @@ impl<'d, C: Controller, P: PacketPool> Peripheral<'d, C, P> {
             + for<'t> ControllerCmdSync<LeSetExtScanResponseData<'t>>,
     {
         assert_eq!(sets.len(), handles.len());
-        let host = &self.stack.host;
+        let host = &self.host;
+
+        // Check all sets are valid
+        for set in sets.iter() {
+            if !set.data.is_valid() {
+                return Err(BleHostError::BleHost(Error::InvalidValue));
+            }
+        }
+
         // Check host supports the required advertisement sets
         {
             let result = host.command(LeReadNumberOfSupportedAdvSets::new()).await?;
@@ -242,7 +260,7 @@ impl<'d, C: Controller, P: PacketPool> Peripheral<'d, C, P> {
         host.command(LeSetExtAdvEnable::new(true, handles)).await?;
         drop.defuse();
         Ok(Advertiser {
-            stack: self.stack,
+            host: self.host,
             extended: true,
             done: false,
         })
@@ -262,8 +280,12 @@ impl<'d, C: Controller, P: PacketPool> Peripheral<'d, C, P> {
         C: for<'t> ControllerCmdSync<LeSetExtAdvData<'t>> + for<'t> ControllerCmdSync<LeSetExtScanResponseData<'t>>,
     {
         assert_eq!(sets.len(), handles.len());
-        let host = &self.stack.host;
+        let host = &self.host;
         for (i, set) in sets.iter().enumerate() {
+            if !set.data.is_valid() {
+                return Err(BleHostError::BleHost(Error::InvalidValue));
+            }
+
             let handle = handles[i].adv_handle;
             let data: RawAdvertisement<'k> = set.data.into();
             if !data.adv_data.is_empty() {
@@ -292,12 +314,7 @@ impl<'d, C: Controller, P: PacketPool> Peripheral<'d, C, P> {
     ///
     /// Accepts the next pending connection if there are any.
     pub fn try_accept(&mut self) -> Option<Connection<'d, P>> {
-        if let Poll::Ready(conn) = self
-            .stack
-            .host
-            .connections
-            .poll_accept(LeConnRole::Peripheral, &[], None)
-        {
+        if let Poll::Ready(conn) = self.host.connections.poll_accept(LeConnRole::Peripheral, &[], None) {
             Some(conn)
         } else {
             None
@@ -307,7 +324,7 @@ impl<'d, C: Controller, P: PacketPool> Peripheral<'d, C, P> {
 
 /// Handle to an active advertiser which can accept connections.
 pub struct Advertiser<'d, C, P: PacketPool> {
-    stack: &'d Stack<'d, C, P>,
+    host: &'d BleHost<'d, C, P>,
     extended: bool,
     done: bool,
 }
@@ -318,8 +335,8 @@ impl<'d, C: Controller, P: PacketPool> Advertiser<'d, C, P> {
     /// Returns Error::Timeout if advertiser stopped.
     pub async fn accept(mut self) -> Result<Connection<'d, P>, Error> {
         let result = match select(
-            self.stack.host.connections.accept(LeConnRole::Peripheral, &[]),
-            self.stack.host.advertise_state.wait(),
+            self.host.connections.accept(LeConnRole::Peripheral, &[]),
+            self.host.advertise_state.wait(),
         )
         .await
         {
@@ -334,9 +351,9 @@ impl<'d, C: Controller, P: PacketPool> Advertiser<'d, C, P> {
 impl<C, P: PacketPool> Drop for Advertiser<'_, C, P> {
     fn drop(&mut self) {
         if !self.done {
-            self.stack.host.advertise_command_state.cancel(self.extended);
+            self.host.advertise_command_state.cancel(self.extended);
         } else {
-            self.stack.host.advertise_command_state.canceled();
+            self.host.advertise_command_state.canceled();
         }
     }
 }

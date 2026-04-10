@@ -21,10 +21,10 @@ struct Server {
 struct BatteryService {
     /// Battery Level
     #[descriptor(uuid = descriptors::VALID_RANGE, read, value = [0, 100])]
-    #[descriptor(uuid = descriptors::MEASUREMENT_DESCRIPTION, name = "hello", read, value = "Battery Level")]
-    #[characteristic(uuid = characteristic::BATTERY_LEVEL, read, notify, value = 10)]
+    #[descriptor(uuid = descriptors::MEASUREMENT_DESCRIPTION, name = "hello", read, value = "Battery Level", type = &'static str)]
+    #[characteristic(uuid = characteristic::BATTERY_LEVEL, read, notify, value = 10, permissions(encrypted, cccd = authenticated))]
     level: u8,
-    #[characteristic(uuid = "408813df-5dd4-1f87-ec11-cdb001100000", write, read, notify)]
+    #[characteristic(uuid = "408813df-5dd4-1f87-ec11-cdb001100000", write, read, notify, permissions(read, write = encrypted, cccd = encrypted))]
     status: bool,
 }
 
@@ -39,21 +39,22 @@ where
     let address: Address = Address::random([0xff, 0x8f, 0x19, 0x05, 0xe4, 0xff]);
     info!("Our address = {}", address);
 
-    let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> = HostResources::new();
+    let mut resources: HostResources<_, DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> = HostResources::new();
     let stack = trouble_host::new(controller, &mut resources)
         .set_random_address(address)
         .set_random_generator_seed(random_generator)
-        .set_io_capabilities(IoCapabilities::KeyboardOnly);
-    let Host {
-        mut peripheral, runner, ..
-    } = stack.build();
+        .set_io_capabilities(IoCapabilities::KeyboardOnly)
+        .build();
+
+    let runner = stack.runner();
+    let mut peripheral = stack.peripheral();
 
     info!("Starting advertising and GATT service");
     let server = Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
         name: "TrouBLE",
         appearance: &appearance::power_device::GENERIC_POWER_DEVICE,
     }))
-        .unwrap();
+    .unwrap();
 
     let _ = join(ble_task(runner), async {
         loop {
@@ -74,7 +75,7 @@ where
             }
         }
     })
-        .await;
+    .await;
 }
 
 /// This is a background task that is required to run forever alongside any other BLE tasks.
@@ -123,43 +124,25 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
                 conn.pass_key_input(1234)?;
             }
             GattConnectionEvent::Gatt { event } => {
-                let result = match &event {
+                match &event {
                     GattEvent::Read(event) => {
                         if event.handle() == level.handle {
                             let value = server.get(&level);
                             info!("[gatt] Read Event to Level Characteristic: {:?}", value);
                         }
-                        #[cfg(feature = "security")]
-                        if conn.raw().security_level()?.encrypted() {
-                            None
-                        } else {
-                            Some(AttErrorCode::INSUFFICIENT_ENCRYPTION)
-                        }
-                        #[cfg(not(feature = "security"))]
-                        None
                     }
                     GattEvent::Write(event) => {
                         if event.handle() == level.handle {
                             info!("[gatt] Write Event to Level Characteristic: {:?}", event.data());
                         }
-                        #[cfg(feature = "security")]
-                        if conn.raw().security_level()?.encrypted() {
-                            None
-                        } else {
-                            Some(AttErrorCode::INSUFFICIENT_ENCRYPTION)
-                        }
-                        #[cfg(not(feature = "security"))]
-                        None
                     }
-                    _ => None,
-                };
+                    GattEvent::NotAllowed(event) => {
+                        info!("[gatt] Disallowed GATT request to handle: {:?}", event.handle());
+                    }
+                    _ => (),
+                }
 
-                let reply_result = if let Some(code) = result {
-                    event.reject(code)
-                } else {
-                    event.accept()
-                };
-                match reply_result {
+                match event.accept() {
                     Ok(reply) => reply.send().await,
                     Err(e) => warn!("[gatt] error sending response: {:?}", e),
                 }
@@ -181,7 +164,7 @@ async fn advertise<'values, 'server, C: Controller>(
     let len = AdStructure::encode_slice(
         &[
             AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-            AdStructure::ServiceUuids16(&[[0x0f, 0x18]]),
+            AdStructure::IncompleteServiceUuids16(&[[0x0f, 0x18]]),
             AdStructure::CompleteLocalName(name.as_bytes()),
         ],
         &mut advertiser_data[..],
