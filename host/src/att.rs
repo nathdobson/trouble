@@ -149,6 +149,8 @@ impl Display for AttErrorCode {
     }
 }
 
+impl core::error::Error for AttErrorCode {}
+
 impl codec::Encode for AttErrorCode {
     fn encode(&self, dest: &mut [u8]) -> Result<(), codec::Error> {
         dest[0] = self.value;

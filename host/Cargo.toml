@@ -19,7 +19,7 @@ target = "thumbv7em-none-eabi"
 
 [dependencies]
 aes = { version = "0.8.2", optional = true }
-bt-hci = { version = "0.8", features = ["uuid"] }
+bt-hci = { path="../../bt-hci", features = ["uuid"] }
 cmac = { version = "0.7.2", optional = true }
 embedded-io = { version = "0.7" }
 embassy-sync = {path="../../embassy/embassy-sync"}
@@ -35,6 +35,7 @@ rand = { version="0.8", default-features = false, optional = true}
 serde = { version = "1.0.228", optional = true, default-features = false, features = ["derive"] }
 static_cell = "2.1.0"
 zerocopy = "0.8.21"
+thiserror = {version="2.0.18",default-features = false}
 
 # Logging
 log = { version = "0.4.16", optional = true }

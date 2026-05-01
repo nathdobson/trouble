@@ -20,6 +20,7 @@ use embassy_time::Duration;
 use heapless::{Vec, VecView};
 #[cfg(feature = "security")]
 use rand_core::{CryptoRng, RngCore};
+use thiserror::Error;
 
 use crate::att::AttErrorCode;
 use crate::channel_manager::ChannelStorage;
@@ -275,21 +276,32 @@ impl<E: core::error::Error> core::error::Error for BleHostError<E> {}
 pub const MAX_INVALID_DATA_LEN: usize = 16;
 
 /// Errors related to Host.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Error)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error {
     /// Error encoding parameters for HCI commands.
-    Hci(bt_hci::param::Error),
+    #[error("error encoding parameters for HCI commands")]
+    Hci(#[from] bt_hci::param::Error),
+
     /// Error decoding responses from HCI commands.
-    HciDecode(FromHciBytesError),
+    #[error("error decoding responses from HCI commands")]
+    HciDecode(#[from] FromHciBytesError),
+
     /// Error from the Attribute Protocol.
-    Att(AttErrorCode),
+    #[error("error from the Attribute Protocol")]
+    Att(#[from] AttErrorCode),
+
     #[cfg(feature = "security")]
     /// Error from the security manager
-    Security(PairingFailedReason),
+    #[error("error from the security manager")]
+    Security(#[from] PairingFailedReason),
+
     /// Insufficient space in the buffer.
+    #[error("insufficient space in the buffer")]
     InsufficientSpace,
+
     /// Invalid value.
+    #[error("invalid value")]
     InvalidValue,
 
     /// Unexpected data length.
@@ -297,6 +309,7 @@ pub enum Error {
     /// This happens if the attribute data length doesn't match the input length size,
     /// and the attribute is deemed as *not* having variable length due to the characteristic's
     /// `MAX_SIZE` and `MIN_SIZE` being defined as equal.
+    #[error("unexpected data length (expected {expected}, found {actual})")]
     UnexpectedDataLength {
         /// Expected length.
         expected: usize,
@@ -305,15 +318,19 @@ pub enum Error {
     },
 
     /// Error converting from GATT value.
+    #[error("error converting from GATT value {0:?}")]
     CannotConstructGattValue([u8; MAX_INVALID_DATA_LEN]),
 
     /// Scan config filter accept list is empty.
+    #[error("scan config filter accept list is empty")]
     ConfigFilterAcceptListIsEmpty,
 
     /// Unexpected GATT response.
+    #[error("unexpected GATT response")]
     UnexpectedGattResponse,
 
     /// Received characteristic declaration data shorter than the minimum required length (5 bytes).
+    #[error("malformed characteristic declaration")]
     MalformedCharacteristicDeclaration {
         /// Expected length.
         expected: usize,
@@ -322,9 +339,11 @@ pub enum Error {
     },
 
     /// Failed to decode the data structure within a characteristic declaration attribute value.
+    #[error("malformed characteristic declaration data")]
     InvalidCharacteristicDeclarationData,
 
     /// Failed to finalize the packet.
+    #[error("failed to finalize packet (expected {expected}, found {actual})")]
     FailedToFinalize {
         /// Expected length.
         expected: usize,
@@ -333,75 +352,91 @@ pub enum Error {
     },
 
     /// Codec error.
-    CodecError(codec::Error),
+    #[error("codec error")]
+    CodecError(#[source] codec::Error),
 
     /// Extended advertising not supported.
+    #[error("extended advertising not supported")]
     ExtendedAdvertisingNotSupported,
 
     /// Invalid UUID length.
+    #[error("invalid UUID length {0}")]
     InvalidUuidLength(usize),
 
     /// Error decoding advertisement data.
-    Advertisement(AdvertisementDataError),
+    #[error("error decoding advertisement data")]
+    Advertisement(#[from] AdvertisementDataError),
+
     /// L2CAP credit-based connection refused by the peer.
-    L2capConnectError(crate::types::l2cap::LeCreditConnResultCode),
+    #[error("l2cap credit-based connection refused by the peer")]
+    L2capConnectError(#[from] crate::types::l2cap::LeCreditConnResultCode),
+
     /// Invalid l2cap channel id provided.
+    #[error("invalid l2cap channel id provided")]
     InvalidChannelId,
+
     /// No l2cap channel available.
+    #[error("no l2cap channel available")]
     NoChannelAvailable,
+
     /// Resource not found.
+    #[error("resource not found")]
     NotFound,
+
     /// Invalid state.
+    #[error("invalid state")]
     InvalidState,
+
     /// Out of memory.
+    #[error("out of memory")]
     OutOfMemory,
+
     /// Unsupported operation.
+    #[error("unsupported operation")]
     NotSupported,
+
     /// L2cap channel closed.
+    #[error("l2cap channel closed")]
     ChannelClosed,
+
     /// Operation timed out.
+    #[error("operation timed out")]
     Timeout,
+
     /// Controller is busy.
+    #[error("controller is busy")]
     Busy,
+
     /// No send permits available.
+    #[error("no send permits available")]
     NoPermits,
+
     /// Connection is disconnected.
+    #[error("connection is disconnected")]
     Disconnected,
+
     /// Connection limit has been reached.
+    #[error("connection limit has been reached")]
     ConnectionLimitReached,
+
     /// GATT subscriber limit has been reached.
     ///
     /// The limit can be modified using the `gatt-client-notification-max-subscribers-N` features.
+    #[error("GATT subscribed limit has been reached")]
     GattSubscriberLimitReached,
+
     /// Resource is already in use.
+    #[error("resource is already in use")]
     AlreadyInUse,
+
     /// Other error.
+    #[error("other error")]
     Other,
 }
-
-impl Display for Error {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl core::error::Error for Error {}
 
 impl<E> From<Error> for BleHostError<E> {
     fn from(value: Error) -> Self {
         Self::BleHost(value)
-    }
-}
-
-impl From<FromHciBytesError> for Error {
-    fn from(error: FromHciBytesError) -> Self {
-        Self::HciDecode(error)
-    }
-}
-
-impl From<AttErrorCode> for Error {
-    fn from(error: AttErrorCode) -> Self {
-        Self::Att(error)
     }
 }
 

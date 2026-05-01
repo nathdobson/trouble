@@ -126,6 +126,8 @@ impl core::fmt::Display for Reason {
     }
 }
 
+impl core::error::Error for Reason {}
+
 #[cfg(feature = "defmt")]
 impl defmt::Format for Reason {
     fn format(&self, fmt: defmt::Formatter) {

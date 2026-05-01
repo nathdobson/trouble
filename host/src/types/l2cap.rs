@@ -1,4 +1,5 @@
 use bt_hci::{FixedSizeValue, WriteHci};
+use thiserror::Error;
 
 pub(crate) const L2CAP_CID_ATT: u16 = 0x0004;
 pub(crate) const L2CAP_CID_LE_U_SIGNAL: u16 = 0x0005;
@@ -171,29 +172,39 @@ impl L2capSignal for LeCreditConnReq {
 }
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[repr(u16)]
 /// Result code for an LE Credit Based Connection Response.
 pub enum LeCreditConnResultCode {
     /// Connection successful.
+    #[error("success")]
     Success = 0x0000,
     /// Connection refused — LE_PSM not supported.
+    #[error("connection refused - LE_PSM not supported")]
     SpsmNotSupported = 0x0002,
     /// Connection refused — no resources available.
+    #[error("connection refused - no resources available")]
     NoResources = 0x0004,
     /// Connection refused — insufficient authentication.
+    #[error("connection refused - insufficient authentication")]
     InsufficientAuthentication = 0x0005,
     /// Connection refused — insufficient authorization.
+    #[error("connection refused - insufficient authorization")]
     InsufficientAuthorization = 0x0006,
     /// Connection refused — encryption key size too short.
+    #[error("connection refused - encryption key size too short")]
     EncryptionKeyTooShort = 0x0007,
     /// Connection refused — insufficient encryption.
+    #[error("connection refused - insufficient encryption")]
     InsufficientEncryption = 0x0008,
     /// Connection refused — invalid Source CID.
+    #[error("connection refused - invalid Source CID")]
     InvalidSourceId = 0x0009,
     /// Connection refused — Source CID already allocated.
+    #[error("connection refused - source CID already allocated")]
     ScidAlreadyAllocated = 0x000A,
     /// Connection refused — unacceptable parameters.
+    #[error("connection refused - unacceptable parameters")]
     UnacceptableParameters = 0x000B,
 }
 

@@ -2,7 +2,7 @@
 use bt_hci::param::AdvEventProps;
 pub use bt_hci::param::{AdvChannelMap, AdvFilterPolicy, AdvHandle, AdvSet, PhyKind};
 use embassy_time::Duration;
-
+use thiserror::Error;
 use crate::cursor::{ReadCursor, WriteCursor};
 use crate::types::uuid::Uuid;
 use crate::{bt_hci_duration, codec, Address};
@@ -354,10 +354,11 @@ pub const SIMUL_LE_BR_CONTROLLER: u8 = 0b00001000;
 pub const SIMUL_LE_BR_HOST: u8 = 0b00010000;
 
 /// Error encoding advertisement data.
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Error)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum AdvertisementDataError {
     /// Advertisement data too long for buffer.
+    #[error("advertisement data too long for buffer")]
     TooLong,
 }
 

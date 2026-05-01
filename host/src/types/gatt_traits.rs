@@ -1,24 +1,18 @@
-use core::{mem, slice};
-use core::fmt::{Display, Formatter};
 use bt_hci::uuid::BluetoothUuid16;
+use core::{mem, slice};
 use heapless::{String, Vec};
+use thiserror::Error;
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Error)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 /// Error type to signify an issue when converting from GATT bytes to a concrete type
 pub enum FromGattError {
     /// Byte array's length did not match what was expected for the converted type
+    #[error("invalid length")]
     InvalidLength,
     /// Attempt to encode as string failed due to an invalid character representation in the byte array
+    #[error("invalid character")]
     InvalidCharacter,
-}
-
-impl core::error::Error for FromGattError {}
-
-impl Display for FromGattError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:?}", self)
-    }
 }
 
 /// Trait to allow conversion of a fixed size type to and from a byte slice
@@ -164,8 +158,10 @@ impl<const N: usize> AsGatt for [u8; N] {
 
 impl<const N: usize> FromGatt for String<N> {
     fn from_gatt(data: &[u8]) -> Result<Self, FromGattError> {
-        String::from_utf8(unwrap!(Vec::from_slice(data).map_err(|_| FromGattError::InvalidLength)))
-            .map_err(|_| FromGattError::InvalidCharacter)
+        String::from_utf8(unwrap!(
+            Vec::from_slice(data).map_err(|_| FromGattError::InvalidLength)
+        ))
+        .map_err(|_| FromGattError::InvalidCharacter)
     }
 }
 
