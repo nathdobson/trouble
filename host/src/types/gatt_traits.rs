@@ -1,5 +1,5 @@
 use core::{mem, slice};
-
+use core::fmt::{Display, Formatter};
 use bt_hci::uuid::BluetoothUuid16;
 use heapless::{String, Vec};
 
@@ -11,6 +11,14 @@ pub enum FromGattError {
     InvalidLength,
     /// Attempt to encode as string failed due to an invalid character representation in the byte array
     InvalidCharacter,
+}
+
+impl core::error::Error for FromGattError {}
+
+impl Display for FromGattError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 /// Trait to allow conversion of a fixed size type to and from a byte slice

@@ -2,6 +2,8 @@
 //!
 //! Assumes little endian for all types
 
+use core::fmt::{Display, Formatter};
+
 #[doc(hidden)]
 pub trait FixedSize: Sized {
     const SIZE: usize;
@@ -38,3 +40,11 @@ pub enum Error {
     /// ???
     InvalidValue,
 }
+
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl core::error::Error for Error {}

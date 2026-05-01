@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 use core::cell::{Cell, RefCell};
+use core::fmt::{Display, Formatter};
 use core::mem::{ManuallyDrop, MaybeUninit};
 
 use advertise::AdvertisementDataError;
@@ -84,7 +85,9 @@ pub mod prelude {
     pub use trouble_host_macros::*;
 
     pub use super::att::AttErrorCode;
-    pub use super::{BleHostError, Controller, Error, HostResources, Packet, PacketPool, Stack, StackBuilder};
+    pub use super::{
+        BleHostError, Controller, Error, HostResources, Packet, PacketPool, Stack, StackBuilder,
+    };
     #[cfg(feature = "peripheral")]
     pub use crate::advertise::*;
     #[cfg(feature = "gatt")]
@@ -257,6 +260,17 @@ pub enum BleHostError<E> {
     BleHost(Error),
 }
 
+impl<E: Display> Display for BleHostError<E> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            BleHostError::Controller(c) => write!(f, "{}", c),
+            BleHostError::BleHost(h) => write!(f, "{}", h),
+        }
+    }
+}
+
+impl<E: core::error::Error> core::error::Error for BleHostError<E> {}
+
 /// How many bytes of invalid data to capture in the error variants before truncating.
 pub const MAX_INVALID_DATA_LEN: usize = 16;
 
@@ -364,6 +378,14 @@ pub enum Error {
     /// Other error.
     Other,
 }
+
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl core::error::Error for Error {}
 
 impl<E> From<Error> for BleHostError<E> {
     fn from(value: Error) -> Self {
@@ -619,14 +641,15 @@ pub fn new<
     let host: &'resources mut MaybeUninit<ManuallyDrop<BleHost<'resources, C, P>>> =
         unsafe { core::mem::transmute(&mut resources.host) };
 
-    let host: &'resources mut ManuallyDrop<BleHost<'resources, C, P>> = host.write(ManuallyDrop::new(BleHost::new(
-        controller,
-        connections,
-        channels,
-        advertise_handles,
-        #[cfg(feature = "security")]
-        bond_storage,
-    )));
+    let host: &'resources mut ManuallyDrop<BleHost<'resources, C, P>> =
+        host.write(ManuallyDrop::new(BleHost::new(
+            controller,
+            connections,
+            channels,
+            advertise_handles,
+            #[cfg(feature = "security")]
+            bond_storage,
+        )));
 
     StackBuilder { host: Some(host) }
 }
@@ -674,13 +697,19 @@ impl<'stack, C: Controller, P: PacketPool> StackBuilder<'stack, C, P> {
     pub fn set_random_address(mut self, address: Address) -> Self {
         self.host().address.replace(address);
         #[cfg(feature = "security")]
-        self.host().connections.security_manager.set_local_address(address);
+        self.host()
+            .connections
+            .security_manager
+            .set_local_address(address);
         self
     }
 
     /// Set the random generator seed for random generator used by security manager.
     #[cfg(feature = "security")]
-    pub fn set_random_generator_seed<RNG: RngCore + CryptoRng>(mut self, _random_generator: &mut RNG) -> Self {
+    pub fn set_random_generator_seed<RNG: RngCore + CryptoRng>(
+        mut self,
+        _random_generator: &mut RNG,
+    ) -> Self {
         {
             let mut random_seed = [0u8; 32];
             _random_generator.fill_bytes(&mut random_seed);
@@ -726,8 +755,16 @@ impl<'stack, C: Controller, P: PacketPool> StackBuilder<'stack, C, P> {
     /// [`Peripheral`](peripheral::Peripheral) handles via [`Stack::central()`] and
     /// [`Stack::peripheral()`].
     pub fn build(mut self) -> Stack<'stack, C, P> {
-        #[cfg(all(feature = "security", not(feature = "dev-disable-csprng-seed-requirement")))]
-        if !self.host().connections.security_manager.get_random_generator_seeded() {
+        #[cfg(all(
+            feature = "security",
+            not(feature = "dev-disable-csprng-seed-requirement")
+        ))]
+        if !self
+            .host()
+            .connections
+            .security_manager
+            .get_random_generator_seeded()
+        {
             panic!(
                 "The security manager random number generator has not been seeded from a cryptographically secure random number generator"
             )
@@ -820,7 +857,9 @@ impl<'stack, C: Controller, P: PacketPool> Stack<'stack, C, P> {
     where
         C: ControllerCmdSync<LeReadMinimumSupportedConnectionInterval>,
     {
-        self.host.command(LeReadMinimumSupportedConnectionInterval::new()).await
+        self.host
+            .command(LeReadMinimumSupportedConnectionInterval::new())
+            .await
     }
 
     /// Read current host metrics
@@ -860,18 +899,30 @@ impl<'stack, C: Controller, P: PacketPool> Stack<'stack, C, P> {
     #[cfg(feature = "security")]
     /// Remove a bonded device
     pub fn remove_bond_information(&self, identity: Identity) -> Result<(), Error> {
-        self.host.connections.security_manager.remove_bond_information(identity)
+        self.host
+            .connections
+            .security_manager
+            .remove_bond_information(identity)
     }
 
     #[cfg(feature = "security")]
     /// Access bonded devices
     pub fn with_bond_information<R>(&self, f: impl FnOnce(&[BondInformation]) -> R) -> R {
-        f(&self.host.connections.security_manager.get_bond_information())
+        f(&self
+            .host
+            .connections
+            .security_manager
+            .get_bond_information())
     }
 
     /// Get a connection by its peer address
-    pub fn get_connection_by_peer_address(&self, peer_address: Address) -> Option<Connection<'_, P>> {
-        self.host.connections.get_connection_by_peer_address(peer_address)
+    pub fn get_connection_by_peer_address(
+        &self,
+        peer_address: Address,
+    ) -> Option<Connection<'_, P>> {
+        self.host
+            .connections
+            .get_connection_by_peer_address(peer_address)
     }
 
     /// Get a connection by its handle
