@@ -1764,6 +1764,7 @@ mod tests {
     use crate::cursor::WriteCursor;
     use crate::pdu::Pdu;
     use crate::prelude::*;
+    use crate::Address;
 
     /// Build a ReadByType ATT request PDU (ATT payload only, no L2CAP header).
     fn build_read_by_type_pdu(start: u16, end: u16, uuid: &Uuid) -> (<DefaultPacketPool as PacketPool>::Packet, usize) {
@@ -1772,6 +1773,17 @@ mod tests {
             end,
             attribute_type: *uuid,
         }));
+
+        let mut packet = DefaultPacketPool::allocate().unwrap();
+        let mut w = WriteCursor::new(packet.as_mut());
+        w.write(att).unwrap();
+        let len = w.len();
+        (packet, len)
+    }
+
+    /// Build a Write Command ATT PDU (ATT payload only, no L2CAP header).
+    fn build_write_cmd_pdu(handle: u16, data: &[u8]) -> (<DefaultPacketPool as PacketPool>::Packet, usize) {
+        let att = Att::Client(AttClient::Command(AttCmd::Write { handle, data }));
 
         let mut packet = DefaultPacketPool::allocate().unwrap();
         let mut w = WriteCursor::new(packet.as_mut());
@@ -1833,8 +1845,7 @@ mod tests {
         assert!(mgr.poll_accept(LeConnRole::Peripheral, &[], None).is_pending());
         unwrap!(mgr.connect(
             ConnHandle::new(0),
-            AddrKind::RANDOM,
-            BdAddr::new(ADDR_1),
+            Address::new(AddrKind::RANDOM, BdAddr::new(ADDR_1)),
             LeConnRole::Peripheral,
             ConnParams::new(),
         ));
@@ -1895,5 +1906,63 @@ mod tests {
             "should discover all {} characteristics",
             NUM_CHARACTERISTICS,
         );
+    }
+
+    #[test]
+    fn test_write_command_surfaces_gatt_write_event_without_att_response() {
+        let _ = env_logger::try_init();
+
+        const MAX_ATTRIBUTES: usize = 16;
+        const CONNECTIONS_MAX: usize = 3;
+        const CCCD_MAX: usize = 16;
+
+        let mut table: AttributeTable<'_, NoopRawMutex, MAX_ATTRIBUTES> = AttributeTable::new();
+        let mut storage = [0u8; 1];
+        let characteristic: Characteristic<u8> = table
+            .add_service(Service {
+                uuid: Uuid::new_long([0x44; 16]),
+            })
+            .add_characteristic(
+                Uuid::new_long([0x45; 16]),
+                &[CharacteristicProp::Read, CharacteristicProp::WriteWithoutResponse],
+                0u8,
+                &mut storage[..],
+            )
+            .build();
+        let server = AttributeServer::<_, DefaultPacketPool, MAX_ATTRIBUTES, CCCD_MAX, CONNECTIONS_MAX>::new(table);
+
+        let mgr = setup();
+        assert!(mgr.poll_accept(LeConnRole::Peripheral, &[], None).is_pending());
+        unwrap!(mgr.connect(
+            ConnHandle::new(0),
+            Address::new(AddrKind::RANDOM, BdAddr::new(ADDR_1)),
+            LeConnRole::Peripheral,
+            ConnParams::new(),
+        ));
+        let Poll::Ready(conn) = mgr.poll_accept(LeConnRole::Peripheral, &[], None) else {
+            panic!("expected connection to be accepted");
+        };
+
+        let payload = [0x2a];
+        let (packet, len) = build_write_cmd_pdu(characteristic.handle, &payload);
+        let pdu = Pdu::new(packet, len);
+
+        let event = GattEvent::new(GattData::new(pdu, conn.clone()), &server);
+        match event {
+            GattEvent::Write(write) => {
+                assert_eq!(write.handle(), characteristic.handle);
+                assert_eq!(write.data(), &payload);
+                let reply = write.accept().unwrap();
+                assert!(
+                    reply.att_payload().is_none(),
+                    "write command must not generate an ATT response"
+                );
+                core::mem::forget(reply);
+            }
+            _ => panic!("expected write event for write command"),
+        }
+
+        let stored: u8 = server.table().get(&characteristic).unwrap();
+        assert_eq!(stored, payload[0]);
     }
 }

@@ -2,7 +2,7 @@ use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use trouble_host::prelude::*;
 
-use crate::common::PSM_L2CAP_EXAMPLES;
+use crate::common::SPSM_L2CAP_EXAMPLES;
 
 /// Max number of connections
 const CONNECTIONS_MAX: usize = 1;
@@ -33,7 +33,7 @@ where
     let config = ConnectConfig {
         connect_params: Default::default(),
         scan_config: ScanConfig {
-            filter_accept_list: &[(target.kind, &target.addr)],
+            filter_accept_list: &[target],
             ..Default::default()
         },
     };
@@ -48,7 +48,7 @@ where
                 mtu: Some(PAYLOAD_LEN as u16),
                 ..Default::default()
             };
-            let mut ch1 = L2capChannel::create(&stack, &conn, PSM_L2CAP_EXAMPLES, &config)
+            let mut ch1 = L2capChannel::create(&stack, &conn, SPSM_L2CAP_EXAMPLES, &config)
                 .await
                 .unwrap();
             info!("New l2cap channel created, sending some data!");

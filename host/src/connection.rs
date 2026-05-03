@@ -7,8 +7,8 @@ use bt_hci::cmd::le::{
 use bt_hci::cmd::status::ReadRssi;
 use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
 use bt_hci::param::{
-    AddrKind, AllPhys, BdAddr, ConnHandle, DisconnectReason, FrameSpaceInitiator, LeConnRole, PhyKind, PhyMask,
-    PhyOptions, SpacingTypes, Status,
+    AllPhys, ConnHandle, DisconnectReason, FrameSpaceInitiator, LeConnRole, PhyKind, PhyMask, PhyOptions, SpacingTypes,
+    Status,
 };
 #[cfg(feature = "connection-params-update")]
 use bt_hci::{
@@ -28,7 +28,7 @@ use crate::prelude::{AttributeServer, GattConnection};
 #[cfg(feature = "security")]
 use crate::security_manager::{BondInformation, PassKey};
 use crate::types::l2cap::ConnParamUpdateRes;
-use crate::{bt_hci_duration, BleHostError, Error, Identity, PacketPool, Stack};
+use crate::{bt_hci_duration, Address, BleHostError, Error, Identity, PacketPool, Stack};
 
 /// Security level of a connection
 ///
@@ -71,7 +71,7 @@ pub struct ScanConfig<'d> {
     /// Active scanning.
     pub active: bool,
     /// List of addresses to accept.
-    pub filter_accept_list: &'d [(AddrKind, &'d BdAddr)],
+    pub filter_accept_list: &'d [Address],
     /// PHYs to scan on.
     pub phys: PhySet,
     /// Scan interval.
@@ -504,6 +504,10 @@ impl<'stack, P: PacketPool> Connection<'stack, P> {
         self.manager.get_att_mtu(self.index)
     }
 
+    pub(crate) fn set_l2cap_listening(&self, listening: bool) {
+        self.manager.set_l2cap_listening(self.index, listening);
+    }
+
     pub(crate) async fn send(&self, pdu: Pdu<P::Packet>) {
         self.manager.send(self.index, pdu).await
     }
@@ -551,13 +555,8 @@ impl<'stack, P: PacketPool> Connection<'stack, P> {
         self.manager.role(self.index)
     }
 
-    /// The peer address kind for this connection.
-    pub fn peer_addr_kind(&self) -> AddrKind {
-        self.manager.peer_addr_kind(self.index)
-    }
-
     /// The peer address for this connection.
-    pub fn peer_address(&self) -> BdAddr {
+    pub fn peer_address(&self) -> Address {
         self.manager.peer_address(self.index)
     }
 

@@ -3,17 +3,17 @@
 set -eo pipefail
 
 if ! command -v cargo-batch &> /dev/null; then
-    mkdir -p $HOME/.cargo/bin
-    curl -L https://github.com/embassy-rs/cargo-batch/releases/download/batch-0.6.0/cargo-batch > $HOME/.cargo/bin/cargo-batch
-    chmod +x $HOME/.cargo/bin/cargo-batch
+    echo "cargo-batch could not be found. Install it with the following command:"
+    echo ""
+    echo "    cargo install --git https://github.com/embassy-rs/cargo-batch cargo --bin cargo-batch --locked"
+    echo ""
+    exit 1
 fi
 
 export RUSTFLAGS=-Dwarnings
 export DEFMT_LOG=trace
-export CARGO_NET_GIT_FETCH_WITH_CLI=true
-if [[ -z "${CARGO_TARGET_DIR}" ]]; then
-    export CARGO_TARGET_DIR=target_ci
-fi
+export RUST_LOG=info
+
 
 cargo batch \
     --- build --release --manifest-path host/Cargo.toml --no-default-features --features peripheral \
@@ -25,6 +25,7 @@ cargo batch \
     --- build --release --manifest-path host/Cargo.toml --no-default-features --features gatt,central \
     --- build --release --manifest-path host/Cargo.toml --no-default-features --features gatt,peripheral,central,scan \
     --- build --release --manifest-path host/Cargo.toml --no-default-features --features gatt,peripheral,central,scan,security \
+    --- build --release --manifest-path host/Cargo.toml --no-default-features --features gatt,peripheral,central,scan,legacy-pairing \
     --- build --release --manifest-path host/Cargo.toml --no-default-features --features gatt,peripheral,central,scan,controller-host-flow-control \
     --- build --release --manifest-path host/Cargo.toml --no-default-features --features gatt,peripheral,central,scan,controller-host-flow-control,connection-metrics,channel-metrics \
     --- build --release --manifest-path host/Cargo.toml --no-default-features --features gatt,peripheral,central,scan,controller-host-flow-control,connection-metrics,channel-metrics,l2cap-sdu-reassembly-optimization \
@@ -33,10 +34,10 @@ cargo batch \
     --- build --release --manifest-path bt-hci-usb/Cargo.toml \
     --- build --release --manifest-path examples/nrf52/Cargo.toml --target thumbv7em-none-eabihf --features nrf52840 \
     --- build --release --manifest-path examples/nrf52/Cargo.toml --target thumbv7em-none-eabihf --features nrf52840,security \
-    --- build --release --manifest-path examples/nrf52/Cargo.toml --target thumbv7em-none-eabihf --features nrf52833 --artifact-dir tests/nrf52 \
-    --- build --release --manifest-path examples/nrf52/Cargo.toml --target thumbv7em-none-eabihf --features nrf52832 \
+    --- build --release --manifest-path examples/nrf52/Cargo.toml --target thumbv7em-none-eabihf --features nrf52833 \
+    --- build --release --manifest-path examples/nrf52/Cargo.toml --target thumbv7em-none-eabihf --features nrf52832 --artifact-dir examples/tests/bins/nrf52 \
     --- build --release --manifest-path examples/nrf54/Cargo.toml --target thumbv8m.main-none-eabihf --features nrf54l15 \
-    --- build --release --manifest-path examples/esp32/Cargo.toml --features esp32c3 --target riscv32imc-unknown-none-elf --artifact-dir tests/esp32 \
+    --- build --release --manifest-path examples/esp32/Cargo.toml --features esp32c3 --target riscv32imc-unknown-none-elf --artifact-dir examples/tests/bins/esp32 \
     --- build --release --manifest-path examples/serial-hci/Cargo.toml \
     --- build --release --manifest-path examples/linux/Cargo.toml \
     --- build --release --manifest-path examples/linux/Cargo.toml --features security \
@@ -52,9 +53,27 @@ cargo batch \
 cargo fmt --check --manifest-path ./host/Cargo.toml
 cargo fmt --check --manifest-path ./tester/app/Cargo.toml
 cargo fmt --check --manifest-path ./tester/nrf52/Cargo.toml
-cargo clippy --manifest-path ./host/Cargo.toml --features gatt,peripheral,central
+cargo clippy --manifest-path ./host/Cargo.toml --features gatt,peripheral,central,legacy-pairing
 cargo test --manifest-path ./host/Cargo.toml --lib -- --nocapture
 cargo test --manifest-path ./host/Cargo.toml --features central,gatt,peripheral,scan,security --lib -- --nocapture
+cargo test --manifest-path ./host/Cargo.toml --features central,gatt,peripheral,scan,legacy-pairing --lib -- --nocapture
 cargo test --manifest-path ./host/Cargo.toml --no-run -- --nocapture
 cargo test --manifest-path ./examples/tests/Cargo.toml --no-run -- --nocapture
 cargo test --manifest-path ./tester/app/Cargo.toml --lib -- --nocapture
+
+
+if [[ -z "${HIL_TOKEN}" ]]; then
+    echo "No HIL token found, skipping running HIL tests"
+    exit
+fi
+
+export RUST_TEST_THREADS=1
+
+echo "Integration tests"
+cargo test --manifest-path host/Cargo.toml --features log --test '*' -- --nocapture
+
+echo "Example tests"
+
+export PROBE_CONFIG=$(jq --arg token "$HIL_TOKEN" '.server.token = $token' .ci/config.json)
+
+cargo test --manifest-path examples/tests/Cargo.toml -- --nocapture

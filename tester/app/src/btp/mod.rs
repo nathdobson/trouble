@@ -53,6 +53,8 @@ trait GapOps {
     fn set_mitm(&self, enabled: bool, real_capability: IoCapabilities);
     fn set_secure_connections_only(&self, enabled: bool);
     fn get_local_oob_data(&self) -> Result<OobData, BtpStatus>;
+    fn enable_privacy(&self) -> Result<(), BtpStatus>;
+    async fn set_rpa_timeout(&self, timeout: Duration) -> Result<(), BtpStatus>;
 }
 
 /// Pre-server GAP backend that stores deferred settings for later application to a StackBuilder.
@@ -61,6 +63,8 @@ pub(crate) struct PreServerGap {
     mitm: Cell<bool>,
     /// Deferred secure-connections-only setting.
     sc_only: Cell<bool>,
+    enable_privacy: Cell<bool>,
+    rpa_timeout: Cell<Duration>,
 }
 
 impl GapOps for PreServerGap {
@@ -78,6 +82,16 @@ impl GapOps for PreServerGap {
 
     fn get_local_oob_data(&self) -> Result<OobData, BtpStatus> {
         Err(BtpStatus::NotReady)
+    }
+
+    fn enable_privacy(&self) -> Result<(), BtpStatus> {
+        self.enable_privacy.set(true);
+        Ok(())
+    }
+
+    async fn set_rpa_timeout(&self, timeout: Duration) -> Result<(), BtpStatus> {
+        self.rpa_timeout.set(timeout);
+        Ok(())
     }
 }
 
@@ -109,6 +123,14 @@ where
     fn get_local_oob_data(&self) -> Result<OobData, BtpStatus> {
         Ok(self.stack.get_local_oob_data())
     }
+
+    fn enable_privacy(&self) -> Result<(), BtpStatus> {
+        Err(BtpStatus::NotReady)
+    }
+
+    async fn set_rpa_timeout(&self, timeout: Duration) -> Result<(), BtpStatus> {
+        self.stack.set_rpa_timeout(timeout).await.map_err(|_| BtpStatus::Fail)
+    }
 }
 
 /// Mutable GAP state tracked across both BTP phases, generic over a backend.
@@ -120,6 +142,8 @@ pub(crate) struct GapState<'a, B> {
     io_capability: IoCapabilities,
     /// Shared OOB state.
     oob: &'a crate::OobState,
+    /// Pre-generated IRK for privacy.
+    irk: IdentityResolvingKey,
     backend: B,
 }
 
@@ -127,7 +151,7 @@ impl<'a> GapState<'a, PreServerGap> {
     /// Apply deferred settings to a StackBuilder, returning the configured builder.
     pub(crate) fn apply_to_builder<'b, C, P: PacketPool>(
         &self,
-        builder: StackBuilder<'b, C, P>,
+        mut builder: StackBuilder<'b, C, P>,
     ) -> StackBuilder<'b, C, P>
     where
         C: crate::Controller,
@@ -137,9 +161,15 @@ impl<'a> GapState<'a, PreServerGap> {
         } else {
             IoCapabilities::NoInputNoOutput
         };
+
+        if self.backend.enable_privacy.get() {
+            builder = builder.enable_privacy(self.irk);
+        }
+
         builder
             .set_io_capabilities(effective_io)
             .set_secure_connections_only(self.backend.sc_only.get())
+            .set_rpa_timeout(self.backend.rpa_timeout.get())
     }
 
     /// Convert this pre-server GapState into a post-server GapState backed by a Stack.
@@ -153,6 +183,7 @@ impl<'a> GapState<'a, PreServerGap> {
             scan_mode: self.scan_mode,
             io_capability: self.io_capability,
             oob: self.oob,
+            irk: self.irk,
             backend: StackGap { stack },
         }
     }
@@ -187,10 +218,18 @@ impl<T> From<Result<T, BtpStatus>> for HandlerResult<T> {
     }
 }
 
+/// L2CAP listener configuration captured during the pre-server phase.
+pub(crate) struct L2capListenerConfig {
+    pub spsm: u16,
+    pub mtu: Option<u16>,
+    pub response: LeCreditConnResultCode,
+}
+
 /// Result of the pre-server BTP phase.
 pub(crate) struct PreServerResult<'a, R, W> {
     pub transport: BtpTransport<R, W>,
     pub gap: GapState<'a, PreServerGap>,
+    pub l2cap_listener: Option<L2capListenerConfig>,
 }
 
 /// Run the pre-server BTP phase.
@@ -204,6 +243,7 @@ pub(crate) async fn run_pre_server<'a, R: Read, W: Write>(
     config: &BtpConfig<'_>,
     scan_mode: &'a Cell<ScanMode>,
     oob: &'a crate::OobState,
+    irk: IdentityResolvingKey,
     table: &mut AttributeTable<'a, NoopRawMutex, ATTRIBUTE_TABLE_SIZE>,
     packet: &mut BtpPacket,
 ) -> Result<Option<PreServerResult<'a, R, W>>, Error> {
@@ -218,11 +258,16 @@ pub(crate) async fn run_pre_server<'a, R: Read, W: Write>(
         scan_mode,
         io_capability: IoCapabilities::NoInputNoOutput,
         oob,
+        irk,
         backend: PreServerGap {
             mitm: Cell::new(true),
             sc_only: Cell::new(false),
+            enable_privacy: Cell::new(false),
+            rpa_timeout: Cell::new(Duration::from_secs(900)),
         },
     };
+
+    let mut l2cap_listener: Option<L2capListenerConfig> = None;
 
     // Send IUT Ready event before entering the main loop
     info!("Sending IUT Ready event");
@@ -250,9 +295,9 @@ pub(crate) async fn run_pre_server<'a, R: Read, W: Write>(
 
         let response = match command {
             BtpCommand::Core(core_command) => Ok(BtpResponse::Core(handle_core(core_command))),
-            BtpCommand::Gap(gap_command) => {
-                handle_gap_settings(packet.header, &gap_command, config, &mut gap).map(BtpResponse::Gap)
-            }
+            BtpCommand::Gap(gap_command) => handle_gap_settings(packet.header, &gap_command, config, &mut gap)
+                .await
+                .map(BtpResponse::Gap),
             BtpCommand::Gatt(gatt_command) => {
                 handle_gatt_pre_server(gatt_command, service_builder, table).map(BtpResponse::Gatt)
             }
@@ -260,6 +305,15 @@ pub(crate) async fn run_pre_server<'a, R: Read, W: Write>(
                 L2capCommand::ReadSupportedCommands => Ok(BtpResponse::L2cap(L2capResponse::SupportedCommands(
                     protocol::l2cap::SUPPORTED_COMMANDS,
                 ))),
+                L2capCommand::Listen(listen) => {
+                    let mtu = if listen.mtu > 0 { Some(listen.mtu) } else { None };
+                    l2cap_listener = Some(L2capListenerConfig {
+                        spsm: listen.psm,
+                        mtu,
+                        response: listen.response,
+                    });
+                    Ok(BtpResponse::L2cap(L2capResponse::Empty))
+                }
                 _ => Err(BtpStatus::NotReady),
             },
         };
@@ -276,6 +330,7 @@ pub(crate) async fn run_pre_server<'a, R: Read, W: Write>(
                 return Ok(Some(PreServerResult {
                     transport: BtpTransport { reader, writer },
                     gap,
+                    l2cap_listener,
                 }));
             }
             Err(status) => {
@@ -476,7 +531,6 @@ where
                         command_channel::Response::L2cap(response) => {
                             use l2cap::Response as LR;
                             match response {
-                                LR::Listening => Ok(BtpResponse::L2cap(L2capResponse::Empty)),
                                 LR::Connecting(rsp) => Ok(BtpResponse::L2cap(L2capResponse::Connecting(rsp))),
                                 LR::Disconnected => Ok(BtpResponse::L2cap(L2capResponse::Empty)),
                                 LR::DataSent => Ok(BtpResponse::L2cap(L2capResponse::Empty)),
@@ -565,22 +619,23 @@ fn convert_event<'a>(event: &'a Event, current_settings: &mut GapSettings) -> Bt
         Event::DeviceFound {
             address,
             rssi,
-            scan_response,
             adv_data,
+            scan_data,
         } => {
+            let adv_data = adv_data.as_deref().unwrap_or(&[]);
             let mut flags = DeviceFoundFlags::RSSI_VALID;
             if !adv_data.is_empty() {
-                if *scan_response {
-                    flags |= DeviceFoundFlags::SCAN_RSP;
-                } else {
-                    flags |= DeviceFoundFlags::ADV_DATA;
-                }
+                flags |= DeviceFoundFlags::ADV_DATA;
+            }
+            if !scan_data.is_empty() {
+                flags |= DeviceFoundFlags::SCAN_RSP;
             }
             BtpEvent::Gap(GapEvent::DeviceFound(DeviceFoundEvent {
                 address: *address,
                 rssi: *rssi,
                 flags,
                 adv_data,
+                scan_data,
             }))
         }
         Event::DeviceConnected { address, conn_params } => {
@@ -661,7 +716,7 @@ fn convert_event<'a>(event: &'a Event, current_settings: &mut GapSettings) -> Bt
         }
         Event::L2capConnected {
             chan_id,
-            psm,
+            spsm,
             peer_mtu,
             peer_mps,
             our_mtu,
@@ -669,18 +724,18 @@ fn convert_event<'a>(event: &'a Event, current_settings: &mut GapSettings) -> Bt
             address,
         } => BtpEvent::L2cap(L2capEvent::Connected(protocol::l2cap::ConnectedEvent {
             chan_id: *chan_id,
-            psm: *psm,
+            psm: *spsm,
             peer_mtu: *peer_mtu,
             peer_mps: *peer_mps,
             our_mtu: *our_mtu,
             our_mps: *our_mps,
             address: *address,
         })),
-        Event::L2capDisconnected { chan_id, psm, address } => {
+        Event::L2capDisconnected { chan_id, spsm, address } => {
             BtpEvent::L2cap(L2capEvent::Disconnected(protocol::l2cap::DisconnectedEvent {
                 result: 0,
                 chan_id: *chan_id,
-                psm: *psm,
+                psm: *spsm,
                 address: *address,
             }))
         }
@@ -710,7 +765,7 @@ fn handle_core(cmd: CoreCommand) -> CoreResponse {
 
 /// Handle GAP settings commands shared between pre-server and post-server phases.
 /// Returns `Some(result)` if the command was a settings command, `None` for runtime commands.
-fn handle_gap_settings<'a, B: GapOps>(
+async fn handle_gap_settings<'a, B: GapOps>(
     header: BtpHeader,
     cmd: &GapCommand<'_>,
     config: &'a BtpConfig<'a>,
@@ -826,6 +881,22 @@ fn handle_gap_settings<'a, B: GapOps>(
             }
             Ok(GapResponse::Success)
         }
+        SetPrivacy(enabled) => {
+            if *enabled {
+                gap.backend.enable_privacy()?;
+                Ok(change_current_settings(
+                    &mut gap.current_settings,
+                    GapSettings::PRIVACY,
+                    true,
+                ))
+            } else {
+                Err(BtpStatus::Fail)
+            }
+        }
+        SetRpaTimeout(secs) => {
+            gap.backend.set_rpa_timeout(Duration::from_secs(*secs as u64)).await?;
+            Ok(GapResponse::Success)
+        }
         _ => Err(BtpStatus::NotReady),
     }
 }
@@ -849,7 +920,7 @@ where
 
     trace!("handle_gap: {:?}", cmd);
 
-    match handle_gap_settings(header, cmd, config, gap) {
+    match handle_gap_settings(header, cmd, config, gap).await {
         Err(BtpStatus::NotReady) => (),
         result => return result.into(),
     }
@@ -867,7 +938,11 @@ where
                 };
                 channels
                     .peripheral
-                    .send(peripheral::Command::StartAdvertising(ad, timeout))
+                    .send(peripheral::Command::StartAdvertising(
+                        ad,
+                        timeout,
+                        gap.filter_accept_list.clone(),
+                    ))
                     .await;
                 Forwarded
             } else {
@@ -955,7 +1030,7 @@ where
                 conn.peer_identity()
             } else {
                 Identity {
-                    bd_addr: address.addr,
+                    addr: *address,
                     irk: None,
                 }
             };
@@ -1009,7 +1084,9 @@ where
         | SetIoCapability(_)
         | SetMitm(_)
         | SetFilterAcceptList(_)
+        | SetPrivacy(_)
         | SetScOnly(_)
+        | SetRpaTimeout(_)
         | OobLegacySetData(_)
         | OobScGetLocalData
         | OobScSetRemoteData { .. } => unreachable!(),
@@ -1264,23 +1341,16 @@ async fn handle_l2cap(cmd: L2capCommand<'_>, channels: &CommandChannels<'_>) -> 
         L2capCommand::ReadSupportedCommands => {
             HandlerResult::Ready(L2capResponse::SupportedCommands(SUPPORTED_COMMANDS))
         }
-        L2capCommand::Listen(listen) => {
-            channels
-                .l2cap
-                .send(l2cap::Command::Listen {
-                    psm: listen.psm,
-                    mtu: listen.mtu,
-                    response: listen.response,
-                })
-                .await;
-            HandlerResult::Forwarded
+        L2capCommand::Listen(_) => {
+            // Listen must be configured in the pre-server phase
+            HandlerResult::Error(BtpStatus::Fail)
         }
         L2capCommand::Connect(connect) => {
             channels
                 .l2cap
                 .send(l2cap::Command::Connect {
                     address: connect.address,
-                    psm: connect.psm,
+                    spsm: connect.psm,
                     mtu: connect.mtu,
                     num: connect.num,
                 })
@@ -1428,12 +1498,11 @@ mod tests {
     #[test]
     fn convert_device_found_with_adv_data() {
         let mut settings = DEFAULT_SETTINGS;
-        let adv_data = alloc::boxed::Box::from([0x01u8, 0x02]);
         let event = Event::DeviceFound {
             address: test_address(),
             rssi: -50,
-            scan_response: false,
-            adv_data,
+            adv_data: Some(alloc::rc::Rc::from([0x01u8, 0x02].as_slice())),
+            scan_data: alloc::boxed::Box::from([].as_slice()),
         };
         let btp = convert_event(&event, &mut settings);
         if let BtpEvent::Gap(GapEvent::DeviceFound(evt)) = btp {
@@ -1450,17 +1519,18 @@ mod tests {
     #[test]
     fn convert_device_found_scan_response() {
         let mut settings = DEFAULT_SETTINGS;
-        let adv_data = alloc::boxed::Box::from([0x03u8]);
         let event = Event::DeviceFound {
             address: test_address(),
             rssi: -30,
-            scan_response: true,
-            adv_data,
+            adv_data: Some(alloc::rc::Rc::from([0x01u8, 0x02].as_slice())),
+            scan_data: alloc::boxed::Box::from([0x03u8].as_slice()),
         };
         let btp = convert_event(&event, &mut settings);
         if let BtpEvent::Gap(GapEvent::DeviceFound(evt)) = btp {
             assert!(evt.flags.contains(DeviceFoundFlags::SCAN_RSP));
-            assert!(!evt.flags.contains(DeviceFoundFlags::ADV_DATA));
+            assert!(evt.flags.contains(DeviceFoundFlags::ADV_DATA));
+            assert_eq!(evt.adv_data, &[0x01, 0x02]);
+            assert_eq!(evt.scan_data, &[0x03]);
         } else {
             panic!("Expected DeviceFound");
         }
@@ -1472,8 +1542,8 @@ mod tests {
         let event = Event::DeviceFound {
             address: test_address(),
             rssi: -70,
-            scan_response: false,
-            adv_data: alloc::boxed::Box::from([]),
+            adv_data: None,
+            scan_data: alloc::boxed::Box::from([].as_slice()),
         };
         let btp = convert_event(&event, &mut settings);
         if let BtpEvent::Gap(GapEvent::DeviceFound(evt)) = btp {

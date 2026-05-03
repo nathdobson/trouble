@@ -1,7 +1,5 @@
-use futures::future::join;
-use std::time::Duration;
 use tokio::select;
-use trouble_example_tests::{serial, TestContext};
+use trouble_example_tests::{await_test, serial, TestContext};
 use trouble_host::prelude::*;
 
 #[tokio::test]
@@ -11,7 +9,7 @@ async fn ble_l2cap_central_nrf52() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(run_l2cap_central_test(
-            &[("target", "nrf52"), ("board", "microbit")],
+            &[("target", "nrf52")],
             firmware,
         ))
         .await;
@@ -36,12 +34,12 @@ async fn run_l2cap_central_test(labels: &[(&str, &str)], firmware: &str) {
     let ctx = TestContext::new();
     let peripheral = ctx.serial_adapters[0].clone();
 
-    let dut = ctx.find_dut(labels).unwrap();
+    let dut = ctx.find_dut(labels).await.unwrap();
     let token = dut.token();
     let token2 = token.clone();
 
     // Spawn a runner for the target
-    let mut dut = tokio::task::spawn_local(dut.run(firmware.to_string()));
+    let dut = tokio::task::spawn_local(dut.run(firmware.to_string()));
 
     // Run the central in the test using the serial adapter to verify
     let peripheral_address: Address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
@@ -51,6 +49,7 @@ async fn run_l2cap_central_test(labels: &[(&str, &str)], firmware: &str) {
         let mut resources: HostResources<_, DefaultPacketPool, 1, 1> = HostResources::new();
         let stack = trouble_host::new(controller_peripheral, &mut resources)
             .set_random_address(peripheral_address)
+            .register_l2cap_spsm(0x81)
             .build();
         let mut runner = stack.runner();
         let mut peripheral = stack.peripheral();
@@ -86,7 +85,7 @@ async fn run_l2cap_central_test(labels: &[(&str, &str)], firmware: &str) {
                         mtu: Some(PAYLOAD_LEN as u16),
                         ..Default::default()
                     };
-                    let mut ch1 = L2capChannel::accept(&stack, &conn, &[0x81], &config).await?;
+                    let mut ch1 = L2capChannel::listen(&stack, &conn).accept(&config).await?;
 
                     println!("[peripheral] channel created");
 
@@ -115,16 +114,7 @@ async fn run_l2cap_central_test(labels: &[(&str, &str)], firmware: &str) {
         }
     });
 
-    match tokio::time::timeout(Duration::from_secs(30), join(&mut dut, peripheral)).await {
-        Err(_) => {
-            println!("Test timed out");
-            token2.cancel();
-            let _ = tokio::time::timeout(Duration::from_secs(1), dut).await;
-            assert!(false);
-        }
-        Ok((c, p)) => {
-            p.expect("peripheral failed").unwrap();
-            c.expect("central failed").unwrap();
-        }
-    }
+    await_test(dut, peripheral, token2).await;
+    // DUT task is awaited inside `await_test`, so the probe has been dropped here.
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 }
