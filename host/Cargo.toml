@@ -21,8 +21,8 @@ target = "thumbv7em-none-eabi"
 #aes = { version = "0.8.2", optional = true }
 aes = { path="../../block-ciphers/aes", optional = true }
 bt-hci = { path="../../bt-hci", features = ["uuid"] }
-cmac = { version = "0.7.2", optional = true }
-#cmac = { path="../../MACs/cmac", optional = true }
+#cmac = { version = "0.7.2", optional = true }
+cmac = { path="../../MACs/cmac", optional = true }
 embedded-io = { version = "0.7" }
 embassy-sync = {path="../../embassy/embassy-sync"}
 embassy-time = {path="../../embassy/embassy-time"}
