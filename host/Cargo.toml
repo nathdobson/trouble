@@ -18,8 +18,8 @@ features = ["defmt", "peripheral", "central", "gatt", "scan", "derive"]
 target = "thumbv7em-none-eabi"
 
 [dependencies]
-aes = { version = "0.8.2", optional = true }
-#aes = { path="../../block-ciphers/aes", optional = true }
+#aes = { version = "0.8.2", optional = true }
+aes = { path="../../block-ciphers/aes", optional = true }
 bt-hci = { path="../../bt-hci", features = ["uuid"] }
 cmac = { version = "0.7.2", optional = true }
 #cmac = { path="../../MACs/cmac", optional = true }
